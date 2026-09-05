@@ -1,0 +1,8 @@
+name = "matimo-api"
+main = "worker.js"
+compatibility_date = "2026-09-05"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "matimo-db"
+database_id = "7037cf96-ba1e-44c8-946e-31ebc390d335"
