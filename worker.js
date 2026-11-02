@@ -9,11 +9,15 @@
  *  - POST /api/login     -> Giriş, oturum token'ı döner
  *  - GET  /api/me         -> Token ile giriş yapmış kullanıcının bilgileri
  *  - POST /api/logout    -> Oturumu kapatır
+ *  - GET  /api/admin/users -> Üye listesi (sadece ADMIN_KEY ile)
  *
  * İzin verilen kaynaklar (CORS):
  *  - https://matimoegitim.com
  *  - https://www.matimoegitim.com
  */
+
+// Yönetici şifresinin SHA-256 özeti (şifrenin kendisi kodda yok)
+const ADMIN_HASH = "16e629af0412de24db18dbd28c110fa530d59033c408d41eb42ff33042709d76";
 
 const ALLOWED_ORIGINS = [
   "https://matimoegitim.com",
@@ -253,6 +257,21 @@ export default {
           await env.DB.prepare("DELETE FROM sessions WHERE token = ?").bind(token).run();
         }
         return jsonResponse({ status: "ok", message: "Çıkış yapıldı" }, 200, origin);
+      }
+
+      // GET /api/admin/users -> Üye listesi (yönetici anahtarı gerekir)
+      if (url.pathname === "/api/admin/users" && request.method === "GET") {
+        const key = (request.headers.get("Authorization") || "").replace("Bearer ", "").trim();
+        const keyHash = bufferToHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)));
+        const envKey = (env.ADMIN_KEY || "").trim();
+        if (!key || (keyHash !== ADMIN_HASH && key !== envKey)) {
+          return jsonResponse({ error: "Yetkisiz" }, 401, origin);
+        }
+
+        const { results } = await env.DB
+          .prepare("SELECT id, name, email, grade, membership, created_at FROM users ORDER BY created_at DESC")
+          .all();
+        return jsonResponse({ status: "ok", count: results.length, users: results }, 200, origin);
       }
 
       // Eşleşen rota yok
