@@ -10,11 +10,14 @@
  *  - GET  /api/me         -> Token ile giriş yapmış kullanıcının bilgileri
  *  - POST /api/logout    -> Oturumu kapatır
  *  - GET  /api/admin/users -> Üye listesi (sadece ADMIN_KEY ile)
+ *  - POST /api/iletisim  -> Sitedeki "Bana yaz" kutusundan gelen mesaj (D1'e kaydedilir + e-posta gönderilir)
  *
  * İzin verilen kaynaklar (CORS):
  *  - https://matimoegitim.com
  *  - https://www.matimoegitim.com
  */
+
+import { EmailMessage } from "cloudflare:email";
 
 // Yönetici şifresinin SHA-256 özeti (şifrenin kendisi kodda yok)
 const ADMIN_HASH = "16e629af0412de24db18dbd28c110fa530d59033c408d41eb42ff33042709d76";
@@ -69,6 +72,90 @@ async function ensureSchema(db) {
       FOREIGN KEY (user_id) REFERENCES users(id)
     )
   `).run();
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS iletisim_mesajlari (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ad TEXT,
+      eposta TEXT,
+      mesaj TEXT NOT NULL,
+      sayfa TEXT,
+      ip TEXT,
+      tarih TEXT DEFAULT (datetime('now'))
+    )
+  `).run();
+}
+
+// ---- İletişim kutusu: mesajı kaydet ve e-posta gönder ----
+const ILETISIM_GONDEREN = "iletisim@matimoegitim.com";
+const ILETISIM_SAATLIK_SINIR = 5; // aynı kişiden 1 saatte en fazla 5 mesaj
+
+function utf8Base64(text) {
+  const bytes = new TextEncoder().encode(text);
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s);
+}
+
+async function handleIletisim(request, env, origin) {
+  const body = await request.json().catch(() => null);
+  if (!body) return jsonResponse({ hata: "Geçersiz istek." }, 400, origin);
+
+  // Robot tuzağı: gizli alan doluysa sessizce "tamam" de
+  if (body.web) return jsonResponse({ tamam: true }, 200, origin);
+
+  const ad = String(body.ad || "").trim().slice(0, 80);
+  const eposta = String(body.eposta || "").trim().slice(0, 120);
+  const mesaj = String(body.mesaj || "").trim().slice(0, 2000);
+  const sayfa = String(body.sayfa || "").slice(0, 200);
+  if (mesaj.length < 3) return jsonResponse({ hata: "Lütfen bir mesaj yaz." }, 400, origin);
+  if (eposta && !isValidEmail(eposta)) return jsonResponse({ hata: "E-posta adresini kontrol eder misin?" }, 400, origin);
+
+  const ip = request.headers.get("CF-Connecting-IP") || "";
+
+  const say = await env.DB
+    .prepare("SELECT COUNT(*) AS n FROM iletisim_mesajlari WHERE ip = ? AND tarih > datetime('now', '-1 hour')")
+    .bind(ip)
+    .first();
+  if (say && say.n >= ILETISIM_SAATLIK_SINIR) {
+    return jsonResponse({ hata: "Çok fazla mesaj gönderildi. Biraz sonra tekrar dener misin?" }, 429, origin);
+  }
+
+  // Önce veritabanına kaydet (e-posta gitmese bile mesaj kaybolmasın)
+  await env.DB
+    .prepare("INSERT INTO iletisim_mesajlari (ad, eposta, mesaj, sayfa, ip) VALUES (?, ?, ?, ?, ?)")
+    .bind(ad, eposta, mesaj, sayfa, ip)
+    .run();
+
+  // E-posta gönder (alıcı adresi Cloudflare'de MAIL_ALICI adlı gizli değişkende durur)
+  try {
+    const alici = (env.MAIL_ALICI || "").trim();
+    if (alici && env.MAIL) {
+      const konu = "Matimo mesajı: " + (ad || "İsimsiz");
+      const metin =
+        "Ad: " + (ad || "-") + "\n" +
+        "E-posta: " + (eposta || "-") + "\n" +
+        "Sayfa: " + (sayfa || "-") + "\n\n" +
+        mesaj + "\n";
+      const basliklar = [
+        "From: Matimo <" + ILETISIM_GONDEREN + ">",
+        "To: " + alici,
+        eposta ? "Reply-To: " + eposta : "",
+        "Subject: =?UTF-8?B?" + utf8Base64(konu) + "?=",
+        "Message-ID: <" + crypto.randomUUID() + "@matimoegitim.com>",
+        "Date: " + new Date().toUTCString(),
+        "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=UTF-8",
+        "Content-Transfer-Encoding: base64",
+      ].filter(Boolean).join("\r\n");
+      const ham = basliklar + "\r\n\r\n" + utf8Base64(metin).replace(/.{1,76}/g, "$&\r\n");
+      await env.MAIL.send(new EmailMessage(ILETISIM_GONDEREN, alici, ham));
+    }
+  } catch (e) {
+    console.log("E-posta gönderilemedi:", e && e.message); // mesaj D1'de duruyor
+  }
+
+  return jsonResponse({ tamam: true }, 200, origin);
 }
 
 // ---- Şifre işlemleri (Web Crypto - PBKDF2) ----
@@ -272,6 +359,11 @@ export default {
           .prepare("SELECT id, name, email, grade, membership, created_at FROM users ORDER BY created_at DESC")
           .all();
         return jsonResponse({ status: "ok", count: results.length, users: results }, 200, origin);
+      }
+
+      // POST /api/iletisim -> "Bana yaz" kutusundan gelen mesaj
+      if ((url.pathname === "/api/iletisim" || url.pathname === "/iletisim") && request.method === "POST") {
+        return handleIletisim(request, env, origin);
       }
 
       // Eşleşen rota yok

@@ -6,3 +6,7 @@ compatibility_date = "2026-09-05"
 binding = "DB"
 database_name = "matimo-db"
 database_id = "7037cf96-ba1e-44c8-946e-31ebc390d335"
+
+# Sitedeki "Bana yaz" kutusunun mesajlarını e-postayla göndermek için
+[[send_email]]
+name = "MAIL"
